@@ -8,13 +8,18 @@ import os
 import time
 import sys
 
+from math import*
+from decimal import Decimal
+
 import tensorflow as tf
 import tensorflow_hub as hub
 
-from annoy import AnnoyIndex
-
 import numpy as np
 import pandas as pd
+
+from annoy import AnnoyIndex
+
+from gensim.parsing.preprocessing import remove_stopwords
 
 from tinydb import TinyDB, Query
 
@@ -71,6 +76,12 @@ def predict_sentence():
   result = predict(params)
   return json.dumps(result, cls=SimilarityResultEncoder)
 
+@app.route('/similarity2', methods=['POST'])
+def predictv2_sentence():
+  params = request.get_json()
+  result = predict2(params)
+  return json.dumps(result, cls=SimilarityResultEncoder)
+
 # methods called from the APIs
 def get_index_files():
   result = None
@@ -105,6 +116,7 @@ def train(params):
   use_model = default_use_model
   num_trees = default_num_trees
   model_name = index_filename
+  stop_words = False
 
   try:
     if params:
@@ -119,6 +131,8 @@ def train(params):
         use_model = params.get('use_model')
       if params.get('model_name'):
         model_name = params.get('model_name')
+      if params.get('stop_words'):
+        stop_words = params.get('stop_words')
 
     start_time = time.time()
     embed_func = hub.Module(use_model)
@@ -138,7 +152,7 @@ def train(params):
     print('Read Data Time: {}'.format(end_time - start_time))
 
     start_time = time.time()
-    ann = build_index(annoy_vector_dimension, embedding, default_batch_size, sentences, content_array)
+    ann = build_index(annoy_vector_dimension, embedding, default_batch_size, sentences, content_array, stop_words)
     end_time = time.time()
     print('Build Index Time: {}'.format(end_time - start_time))
 
@@ -147,11 +161,11 @@ def train(params):
 
     indexDb = TinyDB(model_indexes_path + model_index_reference_file)
     records = Query()
-    record = indexDb.search(records.filename == index_filename)
+    record = indexDb.search(records.index_filename == index_filename)
     if(len(record) > 0):
-      indexDb.remove(records.filename == index_filename)
+      indexDb.remove(records.index_filename == index_filename)
 
-    indexDb.insert({'model_name': model_name, 'index_filename': index_filename, 'use_model': use_model, 'vector_size': annoy_vector_dimension})
+    indexDb.insert({'model_name': model_name, 'index_filename': index_filename, 'use_model': use_model, 'vector_size': annoy_vector_dimension, 'stop_words': stop_words})
 
     result = {
       'message': 'Training successful'
@@ -176,6 +190,7 @@ def predict(params):
   data_file = default_csv_file_path
   use_model = default_use_model
   k = default_k
+  stop_words = False
 
   input_sentence_id = None
 
@@ -193,6 +208,8 @@ def predict(params):
         use_model = params.get('use_model')
       if params.get('k'):
         k = params.get('k')
+      if params.get('stop_words'):
+        stop_words = params.get('stop_words')
 
     if len(input_sentence_id) <= 0:
       print_with_time('Input Sentence Id: {}'.format(input_sentence_id))
@@ -235,6 +252,9 @@ def predict(params):
     input_data_object = data_frame.query(params_filter)
     input_sentence = input_data_object['CONTENT']
 
+    if stop_words:
+      input_sentence = remove_stopwords(input_sentence)
+
     start_time = time.time()
     sentence_vector = sess.run(embedding, feed_dict={sentences:input_sentence})
     nns = annoy_index.get_nns_by_vector(sentence_vector[0], k)
@@ -260,6 +280,141 @@ def predict(params):
 
   return result    
 
+def predict2(params):
+  result = {}
+
+  print('Predict2', params)
+
+  annoy_vector_dimension = VECTOR_SIZE
+  index_filename = default_index_file
+
+  data_file = default_csv_file_path
+  use_model = default_use_model
+  k = default_k
+
+  input_sentence_id = None
+
+  try:
+    if params:
+      if params.get('guid'):
+        input_sentence_id = params.get('guid')
+      if params.get('vector_size'):
+        annoy_vector_dimension = params.get('vector_size')
+      if params.get('index_filename'):
+        index_filename = params.get('index_filename')
+      if params.get('data_file'):
+        data_file = params.get('data_file')
+      if params.get('use_model'):
+        use_model = params.get('use_model')
+      if params.get('k'):
+        k = params.get('k')
+
+    if len(input_sentence_id) <= 0:
+      print_with_time('Input Sentence Id: {}'.format(input_sentence_id))
+      result = {
+        'error': 'Invalid Input id'
+      }
+      return result
+
+    start_time = time.time()
+    data_frame = read_data(data_file)
+    # content_array = data_frame.to_numpy()
+    end_time = time.time()
+    print_with_time('Time to read data file: {}'.format(end_time-start_time))
+
+    start_time = time.time()
+    # Reduce logging output
+    tf.logging.set_verbosity(tf.logging.ERROR)
+    embed_func = embed_useT('./use-large-3')
+    end_time = time.time()
+    print_with_time('Load the module: {}'.format(end_time-start_time))
+
+    print_with_time('Input Sentence id: {}'.format(input_sentence_id))
+    params_filter = 'GUID == "' + input_sentence_id + '"'
+    input_data_object = data_frame.query(params_filter)
+    input_sentence = input_data_object['CONTENT']
+
+    start_time = time.time()
+    similarities = recommendTopSentences(input_sentence_id, input_sentence.values[0], data_frame, embed_func)
+    sentencesRecommended = sorted(similarities, key = lambda i: i['score'], reverse=True)
+    end_time = time.time()
+    print_with_time('recommendTopSentences Time: {}'.format(end_time-start_time))
+
+    similar_sentences = []
+    for sentence in sentencesRecommended[:k]:
+      params_filter = 'GUID == "' + sentence['guid'] + '"'
+      result_data_object = data_frame.query(params_filter)
+      result_sentence = result_data_object['CONTENT']
+      
+      similar_sentences.append({
+        'guid': sentence['guid'],
+        'content': result_sentence.values[0],
+        'score': sentence['score']
+      })
+
+    result = SimilarityResult(input_sentence_id, input_sentence.values[0], similar_sentences)
+  except Exception as e:
+    print('Exception in predict: {0}'.format(e))
+    result = {
+        'error': 'Failure'
+    }
+
+  return result
+
+def recommendTopSentences(input_sentence_id, input_sentence, data_frame, embed_func):
+    similarities = []
+    measures = Similarity()
+    # filtered_input_sentence = remove_stopwords(input_sentence)
+    input_encoding_matrix = embed_func([input_sentence])
+    for index, row in data_frame.iterrows():
+      sentence = row['CONTENT']
+      guid = row['GUID']
+      if(guid.lower() == input_sentence_id.lower()):
+        continue
+      # filtered_sentence = remove_stopwords(sentence)
+      encoding_matrix = embed_func([sentence])
+      similarities.append({'score': measures.cosine_similarity(input_encoding_matrix[0], encoding_matrix[0]), 'guid': guid})
+      
+    return similarities
+
+def embed_useT(module):
+  with tf.Graph().as_default():
+    sentences = tf.placeholder(tf.string)
+    embed = hub.Module(module)
+    embeddings = embed(sentences)
+    session = tf.train.MonitoredSession()
+  return lambda x: session.run(embeddings, {sentences: x})
+
+
+class Similarity():
+  def euclidean_distance(self,x,y):
+    """ return euclidean distance between two lists """
+    return sqrt(sum(pow(a-b,2) for a, b in zip(x, y)))
+
+  def manhattan_distance(self,x,y):
+    """ return manhattan distance between two lists """
+    return sum(abs(a-b) for a,b in zip(x,y))
+
+  def minkowski_distance(self,x,y,p_value):
+    """ return minkowski distance between two lists """
+    return self.nth_root(sum(pow(abs(a-b),p_value) for a,b in zip(x, y)),
+        p_value)
+
+  def nth_root(self,value, n_root):
+    """ returns the n_root of an value """
+    root_value = 1/float(n_root)
+    return round (Decimal(value) ** Decimal(root_value),3)
+
+  def cosine_similarity(self,x,y):
+    """ return cosine similarity between two lists """
+    numerator = sum(a*b for a,b in zip(x,y))
+    denominator = self.square_rooted(x)*self.square_rooted(y)
+    return round(numerator/float(denominator),3)
+
+  def square_rooted(self,x):
+    """ return 3 rounded square rooted value """
+    return round(sqrt(sum([a*a for a in x])),3)
+
 
 # private methods
 def print_with_time(msg):
@@ -277,28 +432,38 @@ def read_data(path):
 
   return df_docs
 
-def build_index(annoy_vector_dimension, embedding_fun, batch_size, sentences, content_array):
+def build_index(annoy_vector_dimension, embedding_fun, batch_size, sentences, content_array, stop_words):
   ann = AnnoyIndex(annoy_vector_dimension, metric='angular')
   batch_sentences = []
   batch_indexes = []
   last_indexed = 0
   num_batches = 0
+  content = ''
+
   with tf.compat.v1.Session() as sess:
     sess.run([tf.compat.v1.global_variables_initializer(), tf.compat.v1.tables_initializer()])
     for sindex, sentence in enumerate(content_array):
-      batch_sentences.append(sentence[1])
+      content = sentence[1]
+      if stop_words:
+        content = remove_stopwords(sentence[1])
+
+      batch_sentences.append(content)
       batch_indexes.append(sindex)
 
       if len(batch_sentences) == batch_size:
         context_embed = sess.run(embedding_fun, feed_dict={sentences: batch_sentences})
+
         for index in batch_indexes:
           ann.add_item(index, context_embed[index - last_indexed])
           batch_sentences = []
           batch_indexes = []
+
         last_indexed += batch_size
         if num_batches % 10000 == 0:
           print_with_time('sindex: {} annoy_size: {}'.format(sindex, ann.get_n_items()))
+
         num_batches += 1
+
     if batch_sentences:
       context_embed = sess.run(embedding_fun, feed_dict={sentences: batch_sentences})
       for index in batch_indexes:

@@ -1,3 +1,8 @@
+use-large-3
+model-indexes/*
+model-indexes/*.index
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
