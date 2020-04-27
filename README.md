@@ -1,4 +1,4 @@
-# find-similar-sentences
+# sentence-similarity
 Short wikipedia articles lookup using Google's USE (Universal Sentence Encoder) and Annoy (Approximate Nearest Neighbors Oh Yeah).
 
 ### Note: Not the entire wikipedia articles lookup ;). Checkout the disclaimer below
